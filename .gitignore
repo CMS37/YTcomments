@@ -1,0 +1,13 @@
+## Node modules
+node_modules/
+
+## Tokens & credentials
+credentials.json
+tokens/
+
+## Env files
+.env
+
+## OS
+.DS_Store
+Thumbs.db
