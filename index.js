@@ -1,5 +1,6 @@
-#!/usr/bin/env node
-import fs from 'fs/promises';
+// index.js
+import fs from 'fs';
+import fsPromises from 'fs/promises';
 import path from 'path';
 import { spawn } from 'child_process';
 import { google } from 'googleapis';
@@ -8,161 +9,253 @@ import open from 'open';
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
-// Puppeteer Stealth 설정
 puppeteer.use(StealthPlugin());
 
-// YouTube API 스코프 및 경로 설정
 const SCOPES = ['https://www.googleapis.com/auth/youtube.force-ssl'];
-const CREDENTIALS_PATH = path.resolve('credentials.json');
-const TOKEN_DIR = path.resolve('tokens');
-const PROFILE_DIR = path.resolve('profiles');
+const CREDENTIALS_PATH = path.join(process.cwd(), 'credentials.json');
+const TOKEN_DIR       = path.join(process.cwd(), 'tokens');
+const PROFILE_DIR     = path.join(process.cwd(), 'profiles');
 
-// OAuth2 클라이언트 초기화
-const { client_id, client_secret, redirect_uris } =
-  JSON.parse(await fs.readFile(CREDENTIALS_PATH, 'utf-8')).installed;
-const oauth2Client = new google.auth.OAuth2(
-  client_id,
-  client_secret,
-  redirect_uris[0]
-);
+// 디렉터리 보장
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+ensureDir(TOKEN_DIR);
+ensureDir(PROFILE_DIR);
 
-// YouTube URL 또는 ID에서 11자리 영상 ID 추출
-const parseVideoId = input => {
-  const pattern = /(?:[?&]v=|youtu\.be\/|\/embed\/)([A-Za-z0-9_-]{11})/;
-  const m = input.match(pattern);
-  if (m) return m[1];
-  if (/^[A-Za-z0-9_-]{11}$/.test(input)) return input;
-  throw new Error('유효한 YouTube 영상 ID 또는 URL을 입력하세요.');
-};
+// credentials.json 로드
+function loadCredentials() {
+  const content = fs.readFileSync(CREDENTIALS_PATH, 'utf-8');
+  return JSON.parse(content).installed;
+}
 
-// Puppeteer 옵션 (Chrome 탐지 방지)
-const getPuppeteerOptions = userDataDir => ({
-  headless: false,
-  userDataDir,
-  ignoreDefaultArgs: ['--enable-automation'],
-  args: [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-blink-features=AutomationControlled'
-  ],
-  defaultViewport: null,
-  executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
-});
+// OAuth2 클라이언트 생성
+function createOAuthClient() {
+  const { client_id, client_secret, redirect_uris } = loadCredentials();
+  return new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+}
 
-// 1) 계정 OAuth 인증 및 세션 저장
-const authorizeAccount = async () => {
-  // OAuth URL 열기
-  const authUrl = oauth2Client.generateAuthUrl({
+// 계정 인증 → 토큰 저장 + Chrome 프로필 로그인
+async function authorizeAccount() {
+  const oAuth2Client = createOAuthClient();
+  const authUrl = oAuth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES,
     prompt: 'consent'
   });
-  console.log(`\n1) 다음 URL을 브라우저에서 열어 OAuth 인증을 완료하세요:\n${authUrl}\n`);
+  console.log('\n1) 다음 URL을 브라우저에서 열어 로그인·허용하세요:\n', authUrl, '\n');
   await open(authUrl);
 
-  // 인증 코드 입력
-  const { code } = await inquirer.prompt({ name: 'code', message: '2) 브라우저에서 받은 코드를 입력하세요:' });
-  const { tokens } = await oauth2Client.getToken(code.trim());
-  oauth2Client.setCredentials(tokens);
+  const { code } = await inquirer.prompt({
+    name: 'code',
+    message: '2) 브라우저에서 받은 코드를 입력하세요:'
+  });
+  const { tokens } = await oAuth2Client.getToken(code);
+
+  const { accountName } = await inquirer.prompt({
+    name: 'accountName',
+    message: '3) 이 토큰을 저장할 계정 식별용 이름을 입력하세요:'
+  });
 
   // 토큰 저장
-  const { accountName } = await inquirer.prompt({ name: 'accountName', message: '3) 저장할 계정 이름을 입력하세요:' });
-  await fs.writeFile(path.join(TOKEN_DIR, `${accountName}.json`), JSON.stringify(tokens, null, 2));
-  console.log(`✔ tokens/${accountName}.json 저장 완료`);
+  const tokenPath = path.join(TOKEN_DIR, `${accountName}.json`);
+  fs.writeFileSync(tokenPath, JSON.stringify(tokens, null, 2));
+  console.log(`✔ tokens/${accountName}.json 에 저장되었습니다.`);
 
-  // Chrome 자동 실행하여 로그인 세션 저장
-  const profileDir = path.join(PROFILE_DIR, accountName);
-  await fs.mkdir(profileDir, { recursive: true });
-  console.log('\nChrome이 자동으로 실행됩니다. 로그인 후 창을 닫으면 진행됩니다.');
+  // Chrome 프로필 디렉터리 생성
+  const profilePath = path.join(PROFILE_DIR, accountName);
+  ensureDir(profilePath);
+
+  // 시스템 Chrome 경로 (Windows 예시)
   const chromePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-  const chromeProc = spawn(chromePath, [`--user-data-dir=${profileDir}`], { detached: true, stdio: 'ignore' });
+  console.log('\n4) Chrome 로그인 창이 열립니다. YouTube에 로그인한 뒤 창을 닫고 엔터를 누르세요.');
+  const chromeProc = spawn(
+    chromePath,
+    [`--user-data-dir=${profilePath}`, '--new-window'],
+    { detached: true, stdio: 'ignore' }
+  );
   chromeProc.unref();
-  await inquirer.prompt({ name: 'continue', message: '로그인 완료 후 Enter 키를 누르세요.' });
-  console.log(`✔ profiles/${accountName} 세션 준비 완료`);
-};
+  await inquirer.prompt({
+    name: 'dummy',
+    message: '로그인 완료 후 Enter를 누르세요'
+  });
+}
 
-// 2) 댓글 작성 (계정별 개별 댓글 입력 + 딜레이)
-const postComment = async () => {
-  const files = (await fs.readdir(TOKEN_DIR)).filter(f => f.endsWith('.json'));
-  if (!files.length) return console.log('⚠️ 인증된 계정이 없습니다. 먼저 계정을 인증하세요.');
+// URL 또는 ID에서 YouTube 영상 ID만 추출
+function parseVideoId(input) {
+  const m1 = input.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+  if (m1) return m1[1];
+  const m2 = input.match(/youtu\.be\/([A-Za-z0-9_-]{11})/);
+  if (m2) return m2[1];
+  const m3 = input.match(/\/embed\/([A-Za-z0-9_-]{11})/);
+  if (m3) return m3[1];
+  if (/^[A-Za-z0-9_-]{11}$/.test(input)) return input;
+  throw new Error('유효한 YouTube 영상 ID나 URL을 입력해 주세요.');
+}
 
-  // 영상 ID 입력
-  const { rawInput } = await inquirer.prompt({ name: 'rawInput', message: '댓글을 달 YouTube 동영상 URL 또는 ID:' });
+// 댓글 작성
+async function postComment() {
+  // 1) 영상 URL/ID 입력
+  const { rawInput } = await inquirer.prompt({
+    name: 'rawInput',
+    message: '댓글을 달 YouTube 동영상 URL 또는 ID를 입력하세요:'
+  });
   let videoId;
-  try { videoId = parseVideoId(rawInput.trim()); } catch (e) { return console.error(e.message); }
+  try {
+    videoId = parseVideoId(rawInput.trim());
+  } catch (err) {
+    console.error('❌', err.message);
+    return;
+  }
 
-  // 계정+댓글 페어 수집
-  const pairs = [];
-  let remaining = [...files];
+  // 2) 계정 선택
+  const files = fs.readdirSync(TOKEN_DIR).filter(f => f.endsWith('.json'));
+  if (files.length === 0) {
+    console.log('토큰이 없습니다. 먼저 계정을 인증하세요.');
+    return;
+  }
+  const { accountFile } = await inquirer.prompt({
+    type: 'list',
+    name: 'accountFile',
+    message: '어느 계정으로 댓글을 달까요?',
+    choices: files
+  });
+
+  // 3) OAuth2Client에 토큰 적용
+  const oAuth2Client = createOAuthClient();
+  const tokens = JSON.parse(fs.readFileSync(path.join(TOKEN_DIR, accountFile), 'utf-8'));
+  oAuth2Client.setCredentials(tokens);
+
+  // 4) 댓글 내용 입력
+  const { commentText } = await inquirer.prompt({
+    name: 'commentText',
+    message: '작성할 댓글 내용을 입력하세요:'
+  });
+
+  // 5) 댓글 게시
+  const youtube = google.youtube({ version: 'v3', auth: oAuth2Client });
+  try {
+    const res = await youtube.commentThreads.insert({
+      part: 'snippet',
+      requestBody: {
+        snippet: {
+          videoId,
+          topLevelComment: { snippet: { textOriginal: commentText } }
+        }
+      }
+    });
+    console.log('✔ 댓글 게시됨 (ID:', res.data.id, ')');
+  } catch (err) {
+    console.error('댓글 게시 오류:', err.errors || err);
+  }
+}
+
+// 댓글 좋아요
+async function likeComment() {
+	const { commentUrl } = await inquirer.prompt({
+	  name: 'commentUrl',
+	  message: '👍 좋아요를 누를 하이라이트 댓글 URL을 입력하세요:'
+	});
+  
+	let commentId;
+	try {
+	  commentId = new URL(commentUrl).searchParams.get('lc');
+	  if (!commentId) throw new Error();
+	} catch {
+	  console.error('❌ 유효한 YouTube 댓글 URL이 아닙니다.');
+	  return;
+	}
+  
+	const profiles = await fsPromises.readdir(PROFILE_DIR, { withFileTypes: true })
+	  .then(arr => arr.filter(d => d.isDirectory()).map(d => d.name));
+	if (!profiles.length) {
+	  console.log('프로필이 없습니다. 먼저 계정을 인증하세요.');
+	  return;
+	}
+  
+	for (let i = 0; i < profiles.length; i++) {
+	  const prof = profiles[i];
+	  process.stdout.write(`[${i+1}/${profiles.length}] ${prof} 좋아요 처리 중… `);
+  
+	  const browser = await puppeteer.launch({
+		headless: false,
+		userDataDir: path.join(PROFILE_DIR, prof),
+		args: [
+		  '--no-sandbox',
+		  '--disable-setuid-sandbox',
+		//   '--window-position=-10000,-10000'
+		]
+	  });
+	  const page = await browser.newPage();
+	  await page.goto(commentUrl, { waitUntil: 'networkidle2' });
+  
+	  // 1) 댓글 영역 로드 & 스크롤
+	  await page.waitForSelector('ytd-comments', { timeout: 60000 });
+	//   await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+	  await new Promise(r => setTimeout(r, 2000));
+  
+	  // 2) 해당 댓글 스레드를 찾아서 클릭
+	  //    - $$eval: 페이지 내 모든 스레드를 돌며 URL 파라미터와 매칭
+	  const clicked = await page.$$eval(
+		'ytd-comment-thread-renderer',
+		(threads, commentId) => {
+		  for (const th of threads) {
+			const link = th.querySelector('span#published-time-text a');
+			if (link && link.href.includes(`lc=${commentId}`)) {
+			  // linked 속성이 있는 <ytd-comment-view-model> 찾기
+			  const hv = th.querySelector('ytd-comment-view-model[linked]');
+			  if (!hv) continue;
+			  const btn = hv.querySelector('ytd-comment-engagement-bar #like-button');
+			  if (!btn) continue;
+			  btn.click();
+			  return true;
+			}
+		  }
+		  return false;
+		},
+		commentId
+	  );
+  
+	  if (clicked) {
+		console.log('✔ 성공');
+	  } else {
+		console.log('❌ 찾을 수 없음');
+	  }
+  
+	  await browser.close();
+	}
+  
+	console.log('✅ 완료');
+  }
+  
+  
+
+// 메인 메뉴
+async function main() {
   while (true) {
-    const { action } = await inquirer.prompt({ type: 'list', name: 'action', message: `현재 수집된 항목: ${pairs.length}개`, choices: ['계정+댓글 추가', '수집 완료'] });
-    if (action === '수집 완료') break;
-    if (!remaining.length) { console.log('⚠️ 추가할 계정이 없습니다.'); break; }
+    const { action } = await inquirer.prompt({
+      type: 'list',
+      name: 'action',
+      message: '원하는 작업 선택:',
+      choices: [
+        { name: '1) 새 계정 인증', value: 'auth' },
+        { name: '2) 댓글 작성',   value: 'comment' },
+        { name: '3) 댓글 좋아요', value: 'like' },
+        { name: '4) 종료',       value: 'exit' }
+      ]
+    });
 
-    const { accountFile } = await inquirer.prompt({ type: 'list', name: 'accountFile', message: '계정 선택:', choices: remaining });
-    const { commentText } = await inquirer.prompt({ name: 'commentText', message: `[*${accountFile}*] 댓글 내용:` });
-    pairs.push({ accountFile, commentText });
-    remaining = remaining.filter(n => n !== accountFile);
-  }
-  if (!pairs.length) return console.log('⚠️ 최소 하나 이상의 댓글을 입력해야 합니다.');
-
-  // 딜레이 설정
-  const { useDelay } = await inquirer.prompt({ type: 'confirm', name: 'useDelay', message: '계정별 딜레이 적용?', default: false });
-  let delayMs = 0;
-  if (useDelay) {
-    const { delaySec } = await inquirer.prompt({ name: 'delaySec', message: '딜레이 시간(초):', validate: v => v > 0 });
-    delayMs = Number(delaySec) * 1000;
-  }
-
-  // 댓글 게시
-  const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-  for (let i = 0; i < pairs.length; i++) {
-    const { accountFile, commentText } = pairs[i];
-    const tokens = JSON.parse(await fs.readFile(path.join(TOKEN_DIR, accountFile), 'utf-8'));
-    oauth2Client.setCredentials(tokens);
-    try {
-      const { data } = await youtube.commentThreads.insert({ part: 'snippet', requestBody: { snippet: { videoId, topLevelComment: { snippet: { textOriginal: commentText } } } } });
-      console.log(`✅ [${accountFile}] 댓글 성공: ID=${data.id}`);
-    } catch (err) {
-      console.error(`❌ [${accountFile}] 댓글 오류:`, err.errors || err);
-    }
-    if (useDelay && i < pairs.length - 1) {
-      console.log(`⏱ ${delayMs/1000}s 대기중...`);
-      await new Promise(r => setTimeout(r, delayMs));
+    if (action === 'auth') {
+      await authorizeAccount();
+    } else if (action === 'comment') {
+      await postComment();
+    } else if (action === 'like') {
+      await likeComment();
+    } else {
+      console.log('프로그램 종료합니다.');
+      process.exit(0);
     }
   }
-};
+}
 
-// 3) 댓글 좋아요 누르기 (프로필 기반 자동화)
-const likeComment = async () => {
-  const profiles = await fs.readdir(PROFILE_DIR);
-  if (!profiles.length) return console.log('⚠️ 저장된 프로필이 없습니다. 먼저 계정을 인증하세요.');
-
-  const { profile, commentUrl } = await inquirer.prompt([
-    { type: 'list', name: 'profile', message: '계정 선택:', choices: profiles },
-    { name: 'commentUrl', message: '좋아요 누를 댓글 페이지 URL:' }
-  ]);
-  const profileDir = path.join(PROFILE_DIR, profile);
-  const browser = await puppeteer.launch(getPuppeteerOptions(profileDir));
-  const page = await browser.newPage();
-  await page.goto(commentUrl, { waitUntil: 'networkidle2' });
-  await page.waitForSelector('ytd-comment-action-buttons-renderer #like-button');
-  await page.evaluate(() => document.querySelector('ytd-comment-action-buttons-renderer #like-button').click());
-  console.log(`✅ [${profile}] 좋아요 클릭 완료`);
-  await browser.close();
-};
-
-// 메인 실행
-await fs.mkdir(TOKEN_DIR, { recursive: true });
-await fs.mkdir(PROFILE_DIR, { recursive: true });
-const main = async () => {
-  while (true) {
-    const { action } = await inquirer.prompt({ type: 'list', name: 'action', message: '원하는 작업 선택:', choices: ['계정 인증', '댓글 작성', '댓글 좋아요', '종료'] });
-    if (action === '계정 인증') await authorizeAccount();
-    else if (action === '댓글 작성') await postComment();
-    else if (action === '댓글 좋아요') await likeComment();
-    else break;
-  }
-  console.log('프로그램 종료');
-};
-await main();
+main().catch(err => console.error(err));
