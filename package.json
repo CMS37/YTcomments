@@ -13,6 +13,9 @@
   "dependencies": {
     "googleapis": "^148.0.0",
     "inquirer": "^12.6.0",
-    "open": "^10.1.2"
+    "open": "^10.1.2",
+    "puppeteer": "^24.8.2",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
