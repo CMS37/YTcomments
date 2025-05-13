@@ -11,8 +11,9 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "exceljs": "^4.4.0",
     "googleapis": "^148.0.0",
-    "inquirer": "^12.6.0",
+    "inquirer": "^12.6.1",
     "open": "^10.1.2",
     "puppeteer": "^24.8.2",
     "puppeteer-extra": "^3.3.6",

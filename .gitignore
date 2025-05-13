@@ -5,6 +5,7 @@ node_modules/
 credentials.json
 tokens/
 profiles/
+accounts.xlsx
 
 ## Env files
 .env
